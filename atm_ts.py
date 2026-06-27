@@ -163,19 +163,17 @@ class DataManager:
         if symbol in self._cache:
             return self._cache[symbol]
 
-        # For intraday crypto, use ccxt (years of history)
-        # For forex or daily data, use yfinance
+        # Crypto always goes through ccxt (Binance) — Yahoo Finance has reliability issues
+        # with crypto symbols (rate limiting, delisted tickers, API changes).
+        # ccxt with Binance provides clean, paginated OHLCV for any timeframe.
         tf = self.config.timeframe
         is_crypto = symbol in self.config.crypto_assets
 
-        if tf != '1d' and is_crypto:
+        if is_crypto:
             return self.fetch_intraday_ccxt(symbol, tf)
 
-        # Fallback to yfinance for daily or forex
+        # Fallback to yfinance for forex or ETF data
         yf_interval = tf if tf in ('1d', '1h', '5m', '15m', '30m', '60m') else '1d'
-        if yf_interval != '1d' and not is_crypto:
-            logger.info(f"  Note: forex intraday data limited to ~60 days on Yahoo Finance")
-
         logger.info(f"↓ Fetching {symbol} from Yahoo Finance (interval={yf_interval})...")
         for attempt in range(3):
             try:
@@ -219,7 +217,13 @@ class DataManager:
         return symbol in self.config.crypto_assets
 
     def fetch_recent(self, symbol: str, days: int = 250) -> pd.DataFrame:
-        """Fetch recent data for live signal generation."""
+        """Fetch recent data for live signal generation.
+        Crypto goes through ccxt (Binance), non-crypto through Yahoo Finance.
+        """
+        is_crypto = symbol in self.config.crypto_assets
+        if is_crypto:
+            # Use ccxt for crypto (same as fetch(), but with live date range)
+            return self.fetch_intraday_ccxt(symbol, '1d')
         end = datetime.now()
         start = end - timedelta(days=days)
         try:
