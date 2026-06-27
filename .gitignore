@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv
+venv/
+
+# Data files
+atm_ts_trades.csv
+atm_ts_equity.csv
+atm_ts_metrics.json
+atm_ts_backtest.png
+atm_ts_walkforward_oos_trades.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
