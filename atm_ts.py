@@ -233,36 +233,51 @@ class DataManager:
     def is_crypto(self, symbol: str) -> bool:
         return symbol in self.config.crypto_assets
 
-    def fetch_recent(self, symbol: str, days: int = 250) -> pd.DataFrame:
+    def fetch_recent(self, symbol: str, days: int = 350) -> pd.DataFrame:
         """Fetch recent data for live signal generation.
         Crypto goes through ccxt (Binance), non-crypto through Yahoo Finance.
 
         Args:
             symbol: Yahoo-format symbol (e.g. 'BTC-USD')
-            days: Number of days of history to fetch (default 250).
-                  Crypto needs ~300 bars for full indicator warmup.
+            days: Number of days of history to fetch (default 350).
+                  Crypto needs ~300 bars for full indicator warmup;
+                  using 350 gives a buffer for holidays/weekends.
         """
         is_crypto = symbol in self.config.crypto_assets
         if is_crypto:
             # Use ccxt for crypto with a recent date range instead of full history
             start = datetime.now() - timedelta(days=days)
             return self.fetch_intraday_ccxt(symbol, '1d', since=start)
+
+        # Non-crypto: Yahoo Finance with retry logic (same pattern as fetch())
         end = datetime.now()
         start = end - timedelta(days=days)
-        try:
-            df = yf.Ticker(symbol).history(
-                start=start.strftime('%Y-%m-%d'),
-                end=end.strftime('%Y-%m-%d'),
-                interval='1d',
-                auto_adjust=True
-            )
-            df.columns = [c.lower().replace(' ', '_') for c in df.columns]
-            if hasattr(df.index, 'tz') and df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
-            return df
-        except Exception as e:
-            logger.error(f"Failed to fetch recent data for {symbol}: {e}")
-            return pd.DataFrame()
+        logger.info(f"↓ Fetching recent {symbol} from Yahoo Finance...")
+        for attempt in range(3):
+            try:
+                df = yf.Ticker(symbol).history(
+                    start=start.strftime('%Y-%m-%d'),
+                    end=end.strftime('%Y-%m-%d'),
+                    interval='1d',
+                    auto_adjust=True
+                )
+                if df.empty:
+                    logger.warning(f"  No data for {symbol} (attempt {attempt+1}/3)")
+                    time_module.sleep(2)
+                    continue
+
+                df.columns = [c.lower().replace(' ', '_') for c in df.columns]
+                if hasattr(df.index, 'tz') and df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+                logger.info(f"  ✓ {symbol}: {len(df)} bars "
+                            f"({df.index[0].strftime('%Y-%m-%d')} → latest)")
+                return df
+            except Exception as e:
+                logger.warning(f"  Attempt {attempt+1}/3 failed for {symbol}: {e}")
+                time_module.sleep(2)
+
+        logger.error(f"Failed to fetch recent data for {symbol} after 3 attempts")
+        return pd.DataFrame()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1601,7 +1616,7 @@ class LiveTrader:
 
             # Fetch recent data (cache to avoid duplicate calls)
             if symbol not in _fetch_cache:
-                df = self.dm.fetch_recent(symbol, days=300)
+                df = self.dm.fetch_recent(symbol)
                 if df.empty or len(df) < self.cfg.trend_ema + 10:
                     logger.warning(f"  {symbol}: insufficient data")
                     continue
