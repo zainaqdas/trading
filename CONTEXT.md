@@ -1,4 +1,4 @@
-# ATM-TS Session Context — June 27, 2026
+# ATM-TS Session Context — June 28, 2026
 
 This file captures the complete development and review history of ATM-TS v2.0 so a fresh session can resume with full context.
 
@@ -8,14 +8,14 @@ This file captures the complete development and review history of ATM-TS v2.0 so
 
 **ATM-TS v2.0** — Adaptive Trend-Momentum Trading System. A long-only trend-following system for crypto and ETFs with strong capital preservation in bear markets.
 
-**Core identity (final, after 8 review rounds):**
+**Core identity (current, after 9 rounds of development):**
 > A long-only trend-following system with strong capital preservation in bear markets, modest positive expectancy in trending markets, and no edge in ranging markets.
 
 **Defensible use case:** Managed multi-asset exposure that keeps you out of major drawdowns while capturing a reasonable portion of bull trends.
 
 ---
 
-## Development Journey — 8 Review Rounds
+## Development Journey — 9 Rounds
 
 ### Baseline (Pre-Review)
 - Yahoo Finance data, 4 assets (BTC, ETH, EURUSD, GBPUSD)
@@ -35,43 +35,51 @@ This file captures the complete development and review history of ATM-TS v2.0 so
 - Defaults temporarily set to EMA(15/45/180), 7.5% risk, 100% position cap, 50% circuit breaker
 
 ### Round 3 — Multi-Asset & Drawdown Bug Fix
-- Added QQQ, GLD, USO, TLT (ETFs instead of futures to avoid rollover artifacts)
+- Added QQQ, GLD, USO, TLT via Yahoo Finance
 - **Critical bug found**: 100% drawdown from date misalignment (crypto 24/7 vs ETF market-days-only)
 - **Fix**: Forward-filled price DataFrame via `pd.concat().reindex().ffill()`
-- Walk-forward with 6 assets: 3/3 folds valid, 0.998 Sharpe, 16.3% DD
+- Walk-forward with 6 assets: 3/3 folds valid
 
 ### Round 4 — Honest Validation & Walk-Forward Rewrite
 - Risk defaults reverted: 3% risk, 50% position cap, 30% circuit breaker
-- EMAs reverted to 21/55/200 (grid search confirmed as noise)
-- Walk-forward rewritten: time-based folds with fixed default params (no per-window optimization)
+- EMAs reverted to 21/55/200 (grid search confirmed as noise at 41 trades)
+- Walk-forward rewritten: time-based folds with fixed default params
 - **2025 OOS test**: −1.64% (crypto-only) — failed to capture BTC's +60% rally
 - **2017-2019 bear market test**: −3.64% vs BTC's −80% — drawdown control confirmed
-- ATM_TS_FINDINGS.md created with honest assessments
 
 ### Round 5 — Root Cause Diagnosis & Three Fixes
 - **Root cause**: BTC's EMA stack never aligned — 0/634 bars met entry condition
-- **Fix 1**: Two-tier EMA entry (full_stack OR partial_stack with ADX + EMA-200 slope)
-- **Fix 2**: ETH/BTC relative strength filter (skip ETH when underperforming BTC)
+- **Fix 1**: Two-tier EMA entry (full_stack + partial_stack with ADX)
+- **Fix 2**: ETH/BTC relative strength filter
 - **Fix 3**: Circuit breaker tightened to 20%
-- Post-fix results: 148% return (was 181%), 14.3% DD (was 16.3%), WF decay 0.63 (was 0.68)
-- 2025 OOS still negative (−2.53%) but inconclusive (10 trades)
+- Post-fix: +148%, 0.898 Sharpe, 14.3% DD
 
-### Round 6 — LiveTrader Parity
-- Duplicate `fetch()` method removed from DataManager
-- RSI filter fixed to apply to ALL entries including crossovers
-- ETH/BTC filter replicated in LiveTrader
-- Diagnostic signal logging added
+### Rounds 6-8 — LiveTrader Parity, Bug Fixes, Peak Tracking
+- Duplicate methods removed, RSI filter fixed for ALL entries
+- ETH/BTC filter in LiveTrader: exits handled BEFORE filter (critical)
+- `_fetch_cache` added, `_eth_btc_strong()` inlined
+- `self.peak` tracks total portfolio equity (not cash)
 
-### Round 7 — LiveTrader Bug Fixes
-- Duplicate `is_crypto()` removed
-- **Critical fix**: ETH/BTC filter was skipping exit checks — restructured to handle exits BEFORE filter
-- `_fetch_cache` added to eliminate redundant HTTP calls
-- `_eth_btc_strong()` helper removed (logic inlined with cached data)
+### Round 9 — Final: Relaxed Entry + Pullback Redesign + Live Fixes (June 2026)
 
-### Round 8 — Final Peak Tracking Fix
-- `self.peak` now uses total portfolio equity (not just cash)
-- BTC-first ordering dependency documented
-- Document circuit breaker value corrected to 0.20
+**Three experiments over the session:**
+| Experiment | Result | Verdict |
+|---|---|---|
+| ADX threshold 20 | +77%, 0.62 Sharpe (worse) | ❌ REJECTED |
+| Relaxed full_stack (no EMA-200) | +156%, 0.92 Sharpe | ✅ ADOPTED |
+| Pullback redesign (partial_stack) | **+174%, 0.98 Sharpe, 15% DD** | ✅ ADOPTED |
+
+**The pullback redesign:** After relaxing `full_stack`, the old `partial_stack` (which checked `price > EMA-21 > EMA-55`) was a subset of `full_stack` — dead code. External code review confirmed this. Redesigned it to catch genuine pullback entries: price dips below EMA-21 but holds above EMA-55 during strong trends. This is the final configuration.
+
+**Additional fixes from review:**
+- `fetch_intraday_ccxt()`: Added optional `since` parameter. When provided, `end_ts` defaults to `datetime.now()` instead of `config.end_date`. Fixes live trader silently returning no data.
+- `fetch_recent()`: Now passes `since=start` for crypto, fetching only ~300 days instead of full 5-year history.
+
+**Final results (6 assets, 2019-2024):**
+- +174.07%, 0.98 Sharpe, 15.11% DD, 77 trades, 2.26 PF
+- Walk-forward: 2/3 folds positive OOS, all folds have sufficient trades
+- 2025 H2: −1.06%, 1 trade (dormancy not fully solved)
+- Exit reasons: 46 ATR trailing, 18 RSI overbought, 9 hard stop, 3 bearish cross
 
 ---
 
@@ -81,31 +89,32 @@ This file captures the complete development and review history of ATM-TS v2.0 so
 | File | Description | Status |
 |------|-------------|--------|
 | `atm_ts.py` | Main trading system | **Production-ready** |
-| `ATM_TS_FINDINGS.md` | Research & findings document | Complete |
-| `CHANGELOG.md` | Version history across 8 rounds | Complete |
-| `CONTEXT.md` | This file — session context | Complete |
-| `README.md` | Project documentation | Complete |
+| `ATM_TS_FINDINGS.md` | Research & findings document | Updated |
+| `CHANGELOG.md` | Version history across 9 rounds | Updated |
+| `CONTEXT.md` | This file — session context | Updated |
+| `README.md` | Project documentation | Updated |
 
 ### Key Code Architecture
-- **`Config`** — Dataclass with all parameters. `risk_per_trade=0.03`, `max_position_pct=0.50`, `max_drawdown_circuit_breaker=0.20`
-- **`DataManager`** — Fetches data from Binance (crypto via ccxt) and Yahoo Finance (ETFs). Caches results.
+- **`Config`** — Dataclass with all parameters. `crypto_assets`, `etf_assets`, `forex_assets`.
+- **`DataManager`** — Fetches from Binance ccxt (crypto) and Yahoo Finance (ETFs). Caches results.
 - **`Indicators`** — EMA, RSI, ATR, ADX, Bollinger Bands. Zero look-ahead.
-- **`Strategy`** — Two-tier entry: full_stack (price > EMA-21 > EMA-55 > EMA-200) OR partial_stack (price > EMA-21 > EMA-55, ADX > 25, EMA-200 rising). RSI < 70 required for all entries.
-- **`RiskManager`** — Position sizing (equity-based compounding), ATR trailing stops, circuit breaker at 20%.
-- **`Backtester`** — Event-driven loop with forward-filled prices for multi-asset alignment.
-- **`LiveTrader`** — Paper/live trading with diagnostic logging, ETH/BTC filter, same logic as backtester.
-- **`WalkForwardValidator`** — Time-based folds with fixed params, minimum 10-trade filter.
+- **`Strategy`** — Two-tier entry: relaxed full_stack (price > EMA-21 > EMA-55) OR partial_stack (price > EMA-21 > EMA-55, ADX > 25, EMA-200 rising). RSI < 70 required.
+- **`RiskManager`** — Equity-based position sizing, ATR trailing stops, circuit breaker at 20%.
+- **`Backtester`** — Event-driven loop with forward-filled multi-asset prices.
+- **`LiveTrader`** — Paper/live trading with diagnostic logging and ETH/BTC filter.
+- **`WalkForwardValidator`** — Time-based folds with fixed params, min 10 trades filter.
 
-### Validation Results (Post-Fix, 6 assets)
+### Validation Results (Final, 6 assets)
 | Test | Result |
 |------|--------|
-| Full period (2019-2024) | +148%, 0.898 Sharpe, 14.3% DD, 70 trades, PF 2.18 |
-| Walk-forward | 1.03→0.40 Sharpe, decay 0.63, 2/3 folds positive OOS |
-| 2025 OOS | −2.53%, 10 trades (inconclusive) |
+| Full period (2019-2024) | **+174%, 0.98 Sharpe, 15.11% DD, 77 trades, PF 2.26** |
+| Walk-forward | 0.83→0.32 avg OOS Sharpe, 2/3 folds positive OOS |
+| 2025 OOS (Jun 2024-Jun 2025) | −2.92%, 9 trades (inconclusive) |
+| 2025 H2 (Jul-Dec 2025) | −1.06%, 1 trade (near-dormant) |
 | 2017-2019 bear market | −3.64%, 16 trades (capital preservation confirmed) |
 
 ### Unresolved (Cosmetic Only)
-- Redundant ADX check in `partial_stack` (guaranteed true by regime gate). No behavioral impact.
+- Redundant ADX check in `partial_stack` (guaranteed true by regime gate — `partial_stack` is inside `if regime == 'trend'`). No behavioral impact.
 
 ---
 
@@ -119,13 +128,12 @@ trader = LiveTrader(cfg)
 trader.run_loop()  # Continuous scan cycle with diagnostic logging
 ```
 
-The diagnostic logging will log WHY signals are or aren't generated on every scan cycle, including `regime`, `ADX`, `RSI`, `full_stack`, `partial_stack`, `EMA200_slope`, price vs EMA-21, and bullish cross status.
+The diagnostic logging will log WHY signals are or aren't generated on every scan cycle, including `regime`, `ADX`, `RSI`, `relaxed_stack`, `pullback_stack`, `EMA200_slope`, price vs EMA-21, and bullish cross status.
 
 ---
 
 ## Recommended Next Steps (from review)
 
-1. **Run 2025 H2 (Jul-Dec 2025) OOS test** with 6 assets and all fixes — last remaining validation
-2. **Replace TLT with EEM** — TLT had only 2 trades (0% WR), EEM is genuinely uncorrelated
-3. **Deploy paper trader** on 2026 live data for at least one complete market cycle
-4. **Compare live diagnostic logs** against backtest predictions — the only remaining validation that matters
+1. **Replace TLT with EEM** — TLT has 25% WR across 4 trades, EEM is genuinely uncorrelated
+2. **Deploy paper trader** on 2026 live data for at least one complete market cycle
+3. **Compare live diagnostic logs** against backtest predictions — the only remaining validation that matters

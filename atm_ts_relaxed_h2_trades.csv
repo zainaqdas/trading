@@ -1,0 +1,2 @@
+symbol,dir,regime,entry_date,exit_date,entry,exit,size,pnl,pnl_pct,reason,hold_days,exit_month
+BTC-USD,LONG,trend,2026-04-27,2026-05-22,77410.00566000001,75501.73025000001,0.5160168743818722,-1023.6624793820148,-2.5626882769691837,ATR trailing stop,25,2026-05

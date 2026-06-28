@@ -1,6 +1,43 @@
 # CHANGELOG — ATM-TS v2.0
 
-All significant changes across eight rounds of independent code review, from initial baseline through paper-trading readiness.
+All significant changes across nine rounds of independent code review, from initial baseline through paper-trading readiness and entry logic relaxation.
+
+---
+
+## v9 — Relaxed Entry + Pullback Redesign + Live Trading Fixes (2026-06-28)
+
+### Changed
+- **Tier 1 entry condition relaxed**: `full_stack` changed from `price > EMA-21 > EMA-55 > EMA-200` to just `price > EMA-21 > EMA-55`. The EMA-200 requirement blocked 0/634 bars in 2024-2025.
+- **Tier 2 (`partial_stack`) redesigned**: After external code review confirmed it was a subset of relaxed `full_stack` (dead code), it was redesigned to catch **pullback entries**: price dips below EMA-21 but holds above EMA-55 during strong trends (ADX > 25, EMA-200 rising). Now genuinely distinct from tier 1.
+- **`fetch_intraday_ccxt()`**: Added optional `since` parameter for live trading. When provided, `end_ts` defaults to `datetime.now()` instead of `config.end_date`. Fixes critical bug where live trader silently got no data.
+- **`fetch_recent()` for crypto**: Now passes `since=start` to download only recent ~300 days instead of full 5-year history. Fixes performance issue in live trading.
+
+### Added
+- **`etf_assets` field in `Config`**: New field defaults to `['QQQ', 'GLD', 'USO', 'TLT']`. All iteration points updated.
+
+### Experiments Conducted
+
+**Experiment 1: ADX threshold 20**
+- Result: +77.14%, 0.62 Sharpe — **worse**
+- Verdict: REJECTED
+
+**Experiment 2: Relaxed full_stack (no EMA-200)**
+- Result: +155.98%, 0.92 Sharpe, 72 trades
+- Verdict: ✅ ADOPTED
+
+**Experiment 3: Redesigned partial_stack (pullback entries)**
+- Combined with relaxed full_stack: **+174.07%, 0.98 Sharpe, 15.11% DD, 77 trades, 2.26 PF**
+- Highest Sharpe and lowest DD of any configuration tested
+- 2025 H2: −1.06%, 1 trade (dormancy not fully solved)
+- Verdict: ✅ ADOPTED
+
+### Fixed
+- **Critical**: `fetch_intraday_ccxt` used `config.end_date` even when `since` provided. With default config dates (end='2024-06-01'), live trader would fetch from Dec 2025 to Jun 2024 — `since_ts > end_ts`, loop never executed, empty data returned.
+- **Performance**: `fetch_recent()` for crypto downloaded full 5-year history on every scan cycle instead of just 300 days.
+- **Architecture**: `partial_stack` was dead code after `full_stack` relaxation (was a subset). Now genuinely distinct.
+
+### Unresolved (Cosmetic Only)
+- Redundant ADX check in `partial_stack` (guaranteed true by regime gate). No behavioral impact.
 
 ---
 

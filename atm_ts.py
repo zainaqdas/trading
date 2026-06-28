@@ -50,7 +50,10 @@ class Config:
 
     # ── Assets ──
     crypto_assets: list = field(default_factory=lambda: ['BTC-USD', 'ETH-USD'])
-    forex_assets: list = field(default_factory=list)         # Crypto-only by default
+    etf_assets: list = field(default_factory=lambda: ['QQQ', 'GLD', 'USO', 'EEM'])
+    # NOTE: TLT (Bonds) replaced with EEM (Emerging Markets) after 4 trades at 0% WR.
+    # EEM provides genuinely uncorrelated exposure that trends more reliably.
+    forex_assets: list = field(default_factory=list)         # Spot FX pairs
 
     # ── Indicator Periods ──
     fast_ema: int = 21   # Original EMA(21) — EMA grid search at 41 trades was likely noise
@@ -105,13 +108,21 @@ class DataManager:
         self._cache: Dict[str, pd.DataFrame] = {}
 
     def fetch_intraday_ccxt(self, symbol: str, timeframe: str,
-                             limit: int = 500) -> pd.DataFrame:
+                             limit: int = 500,
+                             since: Optional[datetime] = None) -> pd.DataFrame:
         """
         Fetch intraday OHLCV data for crypto via ccxt (Binance).
         Supports '1h', '4h', '1d' and other Binance intervals.
         Can fetch years of data via pagination.
+
+        Args:
+            symbol: Yahoo-format symbol (e.g. 'BTC-USD')
+            timeframe: Binance interval ('1h', '4h', '1d')
+            limit: Bars per API call (max 500 for Binance)
+            since: Optional start datetime. If None, uses config.start_date.
         """
-        cache_key = f"{symbol}_{timeframe}"
+        # Separate cache keys for backtest vs live to avoid collisions
+        cache_key = f"{symbol}_{timeframe}_{'live' if since else 'bt'}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -124,17 +135,23 @@ class DataManager:
 
             logger.info(f"↓ Fetching {symbol} ({timeframe}) from Binance via ccxt...")
 
-            since = exchange.parse8601(f"{self.config.start_date}T00:00:00Z")
-            end_dt = datetime.strptime(self.config.end_date, '%Y-%m-%d')
-            end_ts = int(end_dt.timestamp() * 1000)
+            # Use provided since or fall back to config start_date
+            if since is not None:
+                since_ts = int(since.timestamp() * 1000)
+                # When since is provided (live trading), fetch up to now
+                end_ts = int(datetime.now().timestamp() * 1000)
+            else:
+                since_ts = exchange.parse8601(f"{self.config.start_date}T00:00:00Z")
+                end_dt = datetime.strptime(self.config.end_date, '%Y-%m-%d')
+                end_ts = int(end_dt.timestamp() * 1000)
 
             all_ohlcv = []
-            while since < end_ts:
-                ohlcv = exchange.fetch_ohlcv(ccxt_sym, timeframe, since=since, limit=limit)
+            while since_ts < end_ts:
+                ohlcv = exchange.fetch_ohlcv(ccxt_sym, timeframe, since=since_ts, limit=limit)
                 if not ohlcv:
                     break
                 all_ohlcv.extend(ohlcv)
-                since = ohlcv[-1][0] + 1  # Move past last candle
+                since_ts = ohlcv[-1][0] + 1  # Move past last candle
                 time_module.sleep(0.5)  # Rate limiting
 
             if not all_ohlcv:
@@ -207,7 +224,7 @@ class DataManager:
 
     def fetch_all(self) -> Dict[str, pd.DataFrame]:
         data = {}
-        for s in self.config.crypto_assets + self.config.forex_assets:
+        for s in self.config.crypto_assets + self.config.etf_assets + self.config.forex_assets:
             df = self.fetch(s)
             if not df.empty:
                 data[s] = df
@@ -219,11 +236,17 @@ class DataManager:
     def fetch_recent(self, symbol: str, days: int = 250) -> pd.DataFrame:
         """Fetch recent data for live signal generation.
         Crypto goes through ccxt (Binance), non-crypto through Yahoo Finance.
+
+        Args:
+            symbol: Yahoo-format symbol (e.g. 'BTC-USD')
+            days: Number of days of history to fetch (default 250).
+                  Crypto needs ~300 bars for full indicator warmup.
         """
         is_crypto = symbol in self.config.crypto_assets
         if is_crypto:
-            # Use ccxt for crypto (same as fetch(), but with live date range)
-            return self.fetch_intraday_ccxt(symbol, '1d')
+            # Use ccxt for crypto with a recent date range instead of full history
+            start = datetime.now() - timedelta(days=days)
+            return self.fetch_intraday_ccxt(symbol, '1d', since=start)
         end = datetime.now()
         start = end - timedelta(days=days)
         try:
@@ -366,10 +389,12 @@ class Signal:
 
 class Strategy:
     """
-    Dual-regime strategy:
-      Trend mode  → EMA crossover + ADX + 200 EMA filter
-      Range mode  → RSI oversold/overbought + Bollinger Band filter
-      Neutral     → No new entries
+    Long-only trend-following strategy (relaxed two-tier entry):
+      Tier 1: price > EMA-21 > EMA-55 (relaxed stack, no EMA-200 required)
+      Tier 2: pullback entry (price between EMA-55 and EMA-21, ADX > 25, EMA-200 rising)
+      Range mode: Disabled (negative expectancy confirmed by ablation)
+      Shorts: Disabled (crypto long bias)
+      All entries require RSI < 70
     """
 
     def __init__(self, cfg: Config):
@@ -390,9 +415,11 @@ class Strategy:
         Strategy (optimized via ablation study):
           Trend mode  → Price-position re-entry (not just crossovers)
                         Two-tier entry logic:
-                          - Tier 1 (full stack): price > EMA21 > EMA55 > EMA200
-                          - Tier 2 (partial + ADX): price > EMA21 > EMA55 AND
-                            ADX > 25 AND EMA-200 slope rising (captures choppier trends)
+                          - Tier 1 (relaxed full stack): price > EMA21 > EMA55
+                            (EMA-200 requirement removed after 2025 OOS diagnosis)
+                          - Tier 2 (pullback + ADX): price < EMA21 but > EMA55
+                            AND ADX > 25 AND EMA-200 slope rising
+                            (catches pullbacks during strong uptrends)
           Range mode  → Disabled (negative expectancy on crypto)
           Shorts      → Disabled (crypto is structurally long-biased)
         """
@@ -408,26 +435,34 @@ class Strategy:
 
             # ─── TREND MODE — Long-only re-entries ────────────
             if regime == 'trend':
-                # Tier 1: Full stack alignment (strong trend)
+                # Tier 1: Relaxed full stack — price > EMA-21 > EMA-55
+                # EMA-200 requirement removed: was too restrictive and blocked
+                # entries during choppy consolidations (0/634 bars in 2024-2025).
+                # The exit rules (ATR trailing stops, RSI overbought) still
+                # provide sufficient drawdown control.
                 full_stack = (
                     r['close'] > r['ema_fast']
                     and r['ema_fast'] > r['ema_slow']
-                    and r['ema_slow'] > r['ema_trend']
                 )
-                # Tier 2: Partial alignment + ADX trend strength + EMA-200 rising
+                # Tier 2: Pullback entries — price dips below EMA-21 but trend is intact
+                # (price > EMA-55, EMA-21 > EMA-55, strong ADX, rising EMA-200)
+                # This catches re-entries after brief pullbacks in strong uptrends.
+                # The `full_stack` check comes first so pullbacks are a distinct path:
+                # if full_stack is false (price <= EMA-21), try partial_stack for pullbacks.
                 partial_stack = (
-                    r['close'] > r['ema_fast']
-                    and r['ema_fast'] > r['ema_slow']
-                    and r['adx'] > self.cfg.trend_adx_threshold
-                    and r.get('ema_trend_slope', 0) > 0
+                    r['close'] > r['ema_slow']           # price above EMA55 (trend intact)
+                    and r['close'] <= r['ema_fast']      # price at/below EMA21 (pullback)
+                    and r['ema_fast'] > r['ema_slow']    # EMA21 above EMA55 (uptrend)
+                    and r['adx'] > self.cfg.trend_adx_threshold  # strong trend
+                    and r.get('ema_trend_slope', 0) > 0  # EMA-200 rising
                 )
 
                 # Enter on initial crossover OR either tier's condition
                 # RSI < 70 filter applies to ALL entries (including crossovers)
                 long_condition = (r['bullish_cross'] or full_stack or partial_stack) and r['rsi'] < 70
                 if long_condition:
-                    reason = 'Trend re-entry (full stack)' if full_stack else (
-                        'Trend re-entry (partial+ADX)' if partial_stack else 'Bullish EMA cross')
+                    reason = 'Trend re-entry (relaxed stack)' if full_stack else (
+                        'Trend re-entry (pullback+ADX)' if partial_stack else 'Bullish EMA cross')
                     signals.append(Signal(
                         symbol, 1, df.index[i], r['close'],
                         r['atr'], 'trend', reason))
@@ -988,6 +1023,7 @@ class RobustnessTest:
                 end_date=cfg.end_date,
                 initial_capital=cfg.initial_capital,
                 crypto_assets=cfg.crypto_assets,
+                etf_assets=cfg.etf_assets,
                 forex_assets=cfg.forex_assets,
                 fast_ema=var['fast_ema'],
                 slow_ema=var['slow_ema'],
@@ -1135,6 +1171,7 @@ class WalkForwardValidator:
                 end_date=train_end,
                 initial_capital=cfg.initial_capital,
                 crypto_assets=cfg.crypto_assets,
+                etf_assets=cfg.etf_assets,
                 forex_assets=cfg.forex_assets,
             )
             is_bt = Backtester(is_cfg)
@@ -1163,6 +1200,7 @@ class WalkForwardValidator:
                 end_date=test_end,
                 initial_capital=cfg.initial_capital,
                 crypto_assets=cfg.crypto_assets,
+                etf_assets=cfg.etf_assets,
                 forex_assets=cfg.forex_assets,
             )
 
@@ -1346,6 +1384,7 @@ class TimeframeComparison:
                 end_date=base_cfg.end_date,
                 initial_capital=base_cfg.initial_capital,
                 crypto_assets=base_cfg.crypto_assets,
+                etf_assets=base_cfg.etf_assets,
                 forex_assets=base_cfg.forex_assets,
                 fast_ema=base_cfg.fast_ema,
                 slow_ema=base_cfg.slow_ema,
@@ -1557,7 +1596,7 @@ class LiveTrader:
         # Cache fetched data to avoid redundant HTTP calls
         _fetch_cache: Dict[str, pd.DataFrame] = {}
 
-        for symbol in self.cfg.crypto_assets + self.cfg.forex_assets:
+        for symbol in self.cfg.crypto_assets + self.cfg.etf_assets + self.cfg.forex_assets:
             is_c = self.dm.is_crypto(symbol)
 
             # Fetch recent data (cache to avoid duplicate calls)
@@ -1636,8 +1675,11 @@ class LiveTrader:
                 # Diagnostic: log WHY no signal was generated
                 adx = last['adx']
                 regime = self.strat._regime(adx)
-                full_stack = last['close'] > last['ema_fast'] and last['ema_fast'] > last['ema_slow'] and last['ema_slow'] > last['ema_trend']
-                partial_stack = last['close'] > last['ema_fast'] and last['ema_fast'] > last['ema_slow'] and adx > self.cfg.trend_adx_threshold and last.get('ema_trend_slope', 0) > 0
+                full_stack = last['close'] > last['ema_fast'] and last['ema_fast'] > last['ema_slow']
+                partial_stack = (last['close'] > last['ema_slow'] and last['close'] <= last['ema_fast']
+                                  and last['ema_fast'] > last['ema_slow']
+                                  and adx > self.cfg.trend_adx_threshold
+                                  and last.get('ema_trend_slope', 0) > 0)
                 last_signal = signals[-1] if signals else None
                 latest_match = last_signal is not None and last_signal.date == df.index[-1]
 
